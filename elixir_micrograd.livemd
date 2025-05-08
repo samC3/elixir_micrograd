@@ -4,7 +4,9 @@
 
 ```elixir
 Mix.install([
-  {:kino, "~> 0.15.3"}
+  {:kino, "~> 0.15.3"},
+  {:tucan, "~> 0.4.1"},
+  {:kino_vega_lite, "~> 0.1.13"}
 ])
 ```
 
@@ -76,7 +78,8 @@ defmodule Value do
     id: integer(),
   }
 
-  def new(data, label), do: %__MODULE__{data: data, label: label} |> gen_id()
+  def new(data, label),
+    do: %__MODULE__{data: data, label: label} |> gen_id()
   
   def gen_id(%__MODULE__{} = v), do: %__MODULE__{v | id: Enum.random(0..1000)}
 end
@@ -96,7 +99,7 @@ b = Value.new(2.0, "b")
 <!-- livebook:{"output":true} -->
 
 ```
-%Value{data: 2.0, grad: nil, op: nil, label: "b", id: 790, children: []}
+%Value{data: 2.0, grad: nil, op: nil, label: "b", id: 317, children: []}
 ```
 
 ```elixir
@@ -131,7 +134,21 @@ defmodule Math do
     |> Value.gen_id()
   end
 
+  def pow(value, exp, result_label) do
+    %Value{
+      data: value.data ** exp.data,
+      children: [value, exp],
+      label: result_label,
+      op: "pow"
+    }
+    |> Value.gen_id()
+  end
+
   def tanh(value, result_label) do
+    if (value.data > 1000.0) do
+      IO.inspect(value)
+    end
+    
     x = value.data
     t = (:math.exp(2 * x) - 1) / (:math.exp(2 * x) + 1)
     
@@ -143,13 +160,23 @@ defmodule Math do
     }
     |> Value.gen_id()
   end
+
+  def relu(value, result_label) do
+    %Value{
+      data: Enum.max([value.data, 0]),
+      children: [value],
+      label: result_label,
+      op: "relu"
+    }
+    |> Value.gen_id()
+  end
 end
 ```
 
 <!-- livebook:{"output":true} -->
 
 ```
-{:module, Math, <<70, 79, 82, 49, 0, 0, 15, ...>>, {:tanh, 2}}
+{:module, Math, <<70, 79, 82, 49, 0, 0, 20, ...>>, {:relu, 2}}
 ```
 
 ```elixir
@@ -162,27 +189,30 @@ defmodule Mermaid do
     |> Kino.Mermaid.new()
   end
 
+  def raw_txt(value) do
+    """
+    flowchart LR
+    #{to_mermaid(value)}
+    """
+  end
+
   defp to_mermaid(nil), do: ""
 
   defp to_mermaid(%{children: []} = value) do
     value_node(value)
   end
 
-  defp to_mermaid(%{children: [child], op: op} = value) do
-    operator_node_id = "#{child.id}#{op}"
+  defp to_mermaid(%{children: children, op: op} = value) do
+    children_ids = Enum.reduce(children, "", & &2 <> to_string(&1.id))
+    operator_node_id = "#{children_ids}#{op}"
 
     """
-    #{to_mermaid(child)} --> #{operator_node_id}[#{op}]
-    #{operator_node_id}[#{op}] --> #{value_node(value)}
-    """
-  end
-
-  defp to_mermaid(%{children: [left, right], op: op} = value) do
-    operator_node_id = "#{left.id}#{op}#{right.id}"
-
-    """
-    #{to_mermaid(left)} --> #{operator_node_id}[#{op}]
-    #{to_mermaid(right)} --> #{operator_node_id}[#{op}]
+    #{
+      for child <- children, reduce: "" do
+        acc ->
+         acc <> "\n #{to_mermaid(child)} --> #{operator_node_id}[#{op}]"
+      end
+    }
     #{operator_node_id}[#{op}] --> #{value_node(value)}
     """
   end
@@ -201,31 +231,6 @@ end
 
 ```
 {:module, Mermaid, <<70, 79, 82, 49, 0, 0, 17, ...>>, {:value_node, 1}}
-```
-
-```elixir
-Math.add(a, b, "c")
-|> Mermaid.render_value()
-```
-
-<!-- livebook:{"output":true} -->
-
-```mermaid
-flowchart LR
-642[a
-data: 1.0
-grad: ]
- --> 642add790[add]
-790[b
-data: 2.0
-grad: ]
- --> 642add790[add]
-642add790[add] --> 303[c
-data: 3.0
-grad: ]
-
-
-
 ```
 
 ```elixir
@@ -296,8 +301,22 @@ defmodule Backward do
   defp calc_gradients(%Value{op: "tanh", children: [child], data: d}, g),
     do: [{child.id, (1 - d ** 2) * g}]
 
+  defp calc_gradients(%Value{op: "pow", children: [child, exp]}, g),
+    do: [{child.id, (exp.data * child.data ** (exp.data - 1)) * g}]
+
   defp calc_gradients(%Value{op: "sum", children: children}, g) do
     for child <- children, do: {child.id, g}
+  end
+
+  defp calc_gradients(%Value{op: "relu", children: [child], data: d}, g) do
+    grad =
+      if d > 0 do
+        g
+      else
+        0
+      end
+    
+    [{child.id, grad}]
   end
 end
 ```
@@ -305,7 +324,7 @@ end
 <!-- livebook:{"output":true} -->
 
 ```
-{:module, Backward, <<70, 79, 82, 49, 0, 0, 17, ...>>, {:calc_gradients, 2}}
+{:module, Backward, <<70, 79, 82, 49, 0, 0, 20, ...>>, {:calc_gradients, 2}}
 ```
 
 ```elixir
@@ -324,6 +343,54 @@ end
 
 ```
 {:module, Rebuild, <<70, 79, 82, 49, 0, 0, 10, ...>>, {:rebuild, 2}}
+```
+
+```elixir
+exp = Value.new(2.0, "exp")
+
+x = Math.add(a, b, "c") |> Math.pow(exp, "sq") |> Math.tanh("tanh")
+
+grads = Backward.compute_grads(x)
+
+Rebuild.rebuild(x, grads)
+|> Mermaid.render_value()
+```
+
+<!-- livebook:{"output":true} -->
+
+```mermaid
+flowchart LR
+
+ 
+ 
+ 138[a
+data: 1.0
+grad: 3.655195026652791e-7]
+ --> 138317add[add]
+ 317[b
+data: 2.0
+grad: 3.655195026652791e-7]
+ --> 138317add[add]
+138317add[add] --> 423[c
+data: 3.0
+grad: 3.655195026652791e-7]
+
+ --> 423922pow[pow]
+ 922[exp
+data: 2.0
+grad: ]
+ --> 423922pow[pow]
+423922pow[pow] --> 191[sq
+data: 9.0
+grad: 6.091991711087985e-8]
+
+ --> 191tanh[tanh]
+191tanh[tanh] --> 332[tanh
+data: 0.999999969540041
+grad: 1.0]
+
+
+
 ```
 
 ```elixir
@@ -358,47 +425,52 @@ Mermaid.render_value(o)
 
 ```mermaid
 flowchart LR
-290[x1
+
+ 
+ 
+ 
+ 471[x1
 data: 2.0
 grad: ]
- --> 290mul220[mul]
-220[w1
+ --> 471916mul[mul]
+ 916[w1
 data: -3.0
 grad: ]
- --> 290mul220[mul]
-290mul220[mul] --> 644[x1*w1
+ --> 471916mul[mul]
+471916mul[mul] --> 883[x1*w1
 data: -6.0
 grad: ]
 
- --> 644add453[add]
-524[x2
+ --> 883159add[add]
+ 
+ 406[x2
 data: 0.0
 grad: ]
- --> 524mul649[mul]
-649[w2
+ --> 406380mul[mul]
+ 380[w2
 data: 1.0
 grad: ]
- --> 524mul649[mul]
-524mul649[mul] --> 453[x2*w2
+ --> 406380mul[mul]
+406380mul[mul] --> 159[x2*w2
 data: 0.0
 grad: ]
 
- --> 644add453[add]
-644add453[add] --> 611[x1*w1+x2*w2
+ --> 883159add[add]
+883159add[add] --> 456[x1*w1+x2*w2
 data: -6.0
 grad: ]
 
- --> 611add646[add]
-646[b
+ --> 456935add[add]
+ 935[b
 data: 6.881373587019543
 grad: ]
- --> 611add646[add]
-611add646[add] --> 967[n
+ --> 456935add[add]
+456935add[add] --> 665[n
 data: 0.8813735870195432
 grad: ]
 
- --> 967tanh[tanh]
-967tanh[tanh] --> 934[o
+ --> 665tanh[tanh]
+665tanh[tanh] --> 959[o
 data: 0.7071067811865476
 grad: 1.0]
 
@@ -417,65 +489,57 @@ Mermaid.render_value(o)
 
 ```mermaid
 flowchart LR
-290[x1
+
+ 
+ 
+ 
+ 471[x1
 data: 2.0
 grad: -1.4999999999999996]
- --> 290mul220[mul]
-220[w1
+ --> 471916mul[mul]
+ 916[w1
 data: -3.0
 grad: 0.9999999999999998]
- --> 290mul220[mul]
-290mul220[mul] --> 644[x1*w1
+ --> 471916mul[mul]
+471916mul[mul] --> 883[x1*w1
 data: -6.0
 grad: 0.4999999999999999]
 
- --> 644add453[add]
-524[x2
+ --> 883159add[add]
+ 
+ 406[x2
 data: 0.0
 grad: 0.4999999999999999]
- --> 524mul649[mul]
-649[w2
+ --> 406380mul[mul]
+ 380[w2
 data: 1.0
 grad: 0.0]
- --> 524mul649[mul]
-524mul649[mul] --> 453[x2*w2
+ --> 406380mul[mul]
+406380mul[mul] --> 159[x2*w2
 data: 0.0
 grad: 0.4999999999999999]
 
- --> 644add453[add]
-644add453[add] --> 611[x1*w1+x2*w2
+ --> 883159add[add]
+883159add[add] --> 456[x1*w1+x2*w2
 data: -6.0
 grad: 0.4999999999999999]
 
- --> 611add646[add]
-646[b
+ --> 456935add[add]
+ 935[b
 data: 6.881373587019543
 grad: 0.4999999999999999]
- --> 611add646[add]
-611add646[add] --> 967[n
+ --> 456935add[add]
+456935add[add] --> 665[n
 data: 0.8813735870195432
 grad: 0.4999999999999999]
 
- --> 967tanh[tanh]
-967tanh[tanh] --> 934[o
+ --> 665tanh[tanh]
+665tanh[tanh] --> 959[o
 data: 0.7071067811865476
 grad: 1.0]
 
 
 
-```
-
-```elixir
-x = [1, 2]
-y = [3, 4]
-
-Enum.zip([x, y])
-```
-
-<!-- livebook:{"output":true} -->
-
-```
-[{1, 3}, {2, 4}]
 ```
 
 ```elixir
@@ -494,7 +558,7 @@ defmodule Neuron do
     }
   end
 
-  def call(%Neuron{weights: weights, bias: bias}, inputs) do
+  def call(%__MODULE__{weights: weights, bias: bias}, inputs) do
     inputs
     |> Enum.zip(weights)
     |> Enum.map(fn {x, w} -> Math.mul(x, w, x.label <> w.label) end)
@@ -502,13 +566,28 @@ defmodule Neuron do
     |> Math.add(bias, "n")
     |> Math.tanh("output")
   end
+
+  def train(%__MODULE__{weights: weights, bias: b} = n, grads, step \\ 0.01) do
+    updated_weights = 
+      Enum.map(weights, fn w ->
+        grad = Map.get(grads, w.id)
+
+        %Value{w | data: w.data + (grad * -step)}
+      end)
+    
+    %__MODULE__{
+      n |
+        weights: updated_weights,
+        bias: %Value{b | data: b.data + (Map.get(grads, b.id) * -step)}
+    }
+  end
 end
 ```
 
 <!-- livebook:{"output":true} -->
 
 ```
-{:module, Neuron, <<70, 79, 82, 49, 0, 0, 18, ...>>, {:call, 2}}
+{:module, Neuron, <<70, 79, 82, 49, 0, 0, 26, ...>>, {:train, 3}}
 ```
 
 ```elixir
@@ -521,48 +600,53 @@ Neuron.new(2)
 
 ```mermaid
 flowchart LR
-290[x1
+
+ 
+ 
+ 
+ 471[x1
 data: 2.0
 grad: ]
- --> 290mul4[mul]
-4[w1
-data: 0.7639636858580996
+ --> 471801mul[mul]
+ 801[w1
+data: 0.18440968930165758
 grad: ]
- --> 290mul4[mul]
-290mul4[mul] --> 944[x1w1
-data: 1.5279273717161992
+ --> 471801mul[mul]
+471801mul[mul] --> 374[x1w1
+data: 0.36881937860331515
 grad: ]
 
- --> 944sum459[sum]
-524[x2
+ --> 374945sum[sum]
+ 
+ 406[x2
 data: 0.0
 grad: ]
- --> 524mul42[mul]
-42[w2
-data: -0.7783282850153421
+ --> 406594mul[mul]
+ 594[w2
+data: -0.2087461171208329
 grad: ]
- --> 524mul42[mul]
-524mul42[mul] --> 459[x2w2
+ --> 406594mul[mul]
+406594mul[mul] --> 945[x2w2
 data: -0.0
 grad: ]
 
- --> 944sum459[sum]
-944sum459[sum] --> 540[x.w
-data: 1.5279273717161992
+ --> 374945sum[sum]
+374945sum[sum] --> 996[x.w
+data: 0.36881937860331515
 grad: ]
 
- --> 540add661[add]
-661[b
-data: -0.3083523139529736
+ --> 996758add[add]
+ 758[b
+data: 0.32494524143200043
 grad: ]
- --> 540add661[add]
-540add661[add] --> 450[n
-data: 1.2195750577632256
+ --> 996758add[add]
+996758add[add] --> 705[n
+data: 0.6937646200353156
 grad: ]
 
- --> 450tanh[tanh]
-450tanh[tanh] --> 842[output
-data: 0.8395287810918671
+ --> 705tanh[tanh]
+705tanh[tanh] --> 347[output
+data: 0.6003950148753732
 grad: ]
 
 
@@ -587,267 +671,133 @@ defmodule Layer do
       Neuron.call(n, inputs)
     end
   end
+
+  def train(layer, grads, step) do
+    %__MODULE__{neurons: Enum.map(layer.neurons, & Neuron.train(&1, grads, step))}
+  end
 end
 ```
 
 <!-- livebook:{"output":true} -->
 
 ```
-{:module, Layer, <<70, 79, 82, 49, 0, 0, 14, ...>>, {:call, 2}}
+{:module, Layer, <<70, 79, 82, 49, 0, 0, 17, ...>>, {:train, 3}}
 ```
 
 ```elixir
-[n1, n2] =
-  Layer.new(2, 2)
-  |> Layer.call([x1, x2])
-# |> Enum.reduce(
-#   Value.new(0.0, "xw_acc"),
-#   fn val, acc -> Math.add(val, acc, "#{val.label}#{acc.label}") end
-# )
-# |> Mermaid.render_value()
-```
-
-<!-- livebook:{"output":true} -->
-
-```
-[
-  %Value{
-    data: -0.9836681091430985,
-    grad: nil,
-    op: "tanh",
-    label: "output",
-    id: 815,
-    children: [
-      %Value{
-        data: -2.399791649747179,
-        grad: nil,
-        op: "add",
-        label: "n",
-        id: 676,
-        children: [
-          %Value{
-            data: -1.7071070353014148,
-            grad: nil,
-            op: "sum",
-            label: "x.w",
-            id: 183,
-            children: [
-              %Value{
-                data: -1.7071070353014148,
-                grad: nil,
-                op: "mul",
-                label: "x1w1",
-                id: 445,
-                children: [
-                  %Value{data: 2.0, grad: nil, op: nil, label: "x1", id: 290, children: []},
-                  %Value{
-                    data: -0.8535535176507074,
-                    grad: nil,
-                    op: nil,
-                    label: "w1",
-                    id: 828,
-                    children: []
-                  }
-                ]
-              },
-              %Value{
-                data: -0.0,
-                grad: nil,
-                op: "mul",
-                label: "x2w2",
-                id: 72,
-                children: [
-                  %Value{data: 0.0, grad: nil, op: nil, label: "x2", id: 524, children: []},
-                  %Value{
-                    data: -0.3809673052307294,
-                    grad: nil,
-                    op: nil,
-                    label: "w2",
-                    id: 608,
-                    children: []
-                  }
-                ]
-              }
-            ]
-          },
-          %Value{data: -0.6926846144457646, grad: nil, op: nil, label: "b", id: 391, children: []}
-        ]
-      }
-    ]
-  },
-  %Value{
-    data: 0.5120540432675122,
-    grad: nil,
-    op: "tanh",
-    label: "output",
-    id: 966,
-    children: [
-      %Value{
-        data: 0.5655098218413082,
-        grad: nil,
-        op: "add",
-        label: "n",
-        id: 533,
-        children: [
-          %Value{
-            data: 0.8633012260696216,
-            grad: nil,
-            op: "sum",
-            label: "x.w",
-            id: 535,
-            children: [
-              %Value{
-                data: 0.8633012260696216,
-                grad: nil,
-                op: "mul",
-                label: "x1w1",
-                id: 863,
-                children: [
-                  %Value{data: 2.0, grad: nil, op: nil, label: "x1", id: 290, children: []},
-                  %Value{
-                    data: 0.4316506130348108,
-                    grad: nil,
-                    op: nil,
-                    label: "w1",
-                    id: 469,
-                    children: []
-                  }
-                ]
-              },
-              %Value{
-                data: 0.0,
-                grad: nil,
-                op: "mul",
-                label: "x2w2",
-                id: 437,
-                children: [
-                  %Value{data: 0.0, grad: nil, op: nil, label: "x2", id: 524, children: []},
-                  %Value{
-                    data: 0.9677210340324143,
-                    grad: nil,
-                    op: nil,
-                    label: "w2",
-                    id: 650,
-                    children: []
-                  }
-                ]
-              }
-            ]
-          },
-          %Value{data: -0.2977914042283134, grad: nil, op: nil, label: "b", id: 47, children: []}
-        ]
-      }
-    ]
-  }
-]
-```
-
-```elixir
-Mermaid.render_value(n1)
+Layer.new(2, 2)
+|> Layer.call([x1, x2])
+|> Math.sum("o")
+|> Mermaid.render_value()
 ```
 
 <!-- livebook:{"output":true} -->
 
 ```mermaid
 flowchart LR
-290[x1
+
+ 
+ 
+ 
+ 
+ 471[x1
 data: 2.0
 grad: ]
- --> 290mul828[mul]
-828[w1
-data: -0.8535535176507074
+ --> 471664mul[mul]
+ 664[w1
+data: -0.36642598886388655
 grad: ]
- --> 290mul828[mul]
-290mul828[mul] --> 445[x1w1
-data: -1.7071070353014148
+ --> 471664mul[mul]
+471664mul[mul] --> 791[x1w1
+data: -0.7328519777277731
 grad: ]
 
- --> 445sum72[sum]
-524[x2
+ --> 791285sum[sum]
+ 
+ 406[x2
 data: 0.0
 grad: ]
- --> 524mul608[mul]
-608[w2
-data: -0.3809673052307294
+ --> 40685mul[mul]
+ 85[w2
+data: 0.24409349169277395
 grad: ]
- --> 524mul608[mul]
-524mul608[mul] --> 72[x2w2
+ --> 40685mul[mul]
+40685mul[mul] --> 285[x2w2
+data: 0.0
+grad: ]
+
+ --> 791285sum[sum]
+791285sum[sum] --> 863[x.w
+data: -0.7328519777277731
+grad: ]
+
+ --> 863669add[add]
+ 669[b
+data: 0.5251697652072103
+grad: ]
+ --> 863669add[add]
+863669add[add] --> 559[n
+data: -0.20768221252056285
+grad: ]
+
+ --> 559tanh[tanh]
+559tanh[tanh] --> 328[output
+data: -0.20474693422201704
+grad: ]
+
+ --> 328950sum[sum]
+ 
+ 
+ 
+ 
+ 471[x1
+data: 2.0
+grad: ]
+ --> 471942mul[mul]
+ 942[w1
+data: -0.7613844056812147
+grad: ]
+ --> 471942mul[mul]
+471942mul[mul] --> 880[x1w1
+data: -1.5227688113624294
+grad: ]
+
+ --> 880834sum[sum]
+ 
+ 406[x2
+data: 0.0
+grad: ]
+ --> 406527mul[mul]
+ 527[w2
+data: -0.07472254500614173
+grad: ]
+ --> 406527mul[mul]
+406527mul[mul] --> 834[x2w2
 data: -0.0
 grad: ]
 
- --> 445sum72[sum]
-445sum72[sum] --> 183[x.w
-data: -1.7071070353014148
+ --> 880834sum[sum]
+880834sum[sum] --> 190[x.w
+data: -1.5227688113624294
 grad: ]
 
- --> 183add391[add]
-391[b
-data: -0.6926846144457646
+ --> 190472add[add]
+ 472[b
+data: -0.08754549039996062
 grad: ]
- --> 183add391[add]
-183add391[add] --> 676[n
-data: -2.399791649747179
-grad: ]
-
- --> 676tanh[tanh]
-676tanh[tanh] --> 815[output
-data: -0.9836681091430985
+ --> 190472add[add]
+190472add[add] --> 507[n
+data: -1.61031430176239
 grad: ]
 
-
-
-```
-
-```elixir
-Mermaid.render_value(n2)
-```
-
-<!-- livebook:{"output":true} -->
-
-```mermaid
-flowchart LR
-290[x1
-data: 2.0
-grad: ]
- --> 290mul469[mul]
-469[w1
-data: 0.4316506130348108
-grad: ]
- --> 290mul469[mul]
-290mul469[mul] --> 863[x1w1
-data: 0.8633012260696216
+ --> 507tanh[tanh]
+507tanh[tanh] --> 950[output
+data: -0.9232064616420873
 grad: ]
 
- --> 863sum437[sum]
-524[x2
-data: 0.0
-grad: ]
- --> 524mul650[mul]
-650[w2
-data: 0.9677210340324143
-grad: ]
- --> 524mul650[mul]
-524mul650[mul] --> 437[x2w2
-data: 0.0
-grad: ]
-
- --> 863sum437[sum]
-863sum437[sum] --> 535[x.w
-data: 0.8633012260696216
-grad: ]
-
- --> 535add47[add]
-47[b
-data: -0.2977914042283134
-grad: ]
- --> 535add47[add]
-535add47[add] --> 533[n
-data: 0.5655098218413082
-grad: ]
-
- --> 533tanh[tanh]
-533tanh[tanh] --> 966[output
-data: 0.5120540432675122
+ --> 328950sum[sum]
+328950sum[sum] --> 764[o
+data: -1.1279533958641044
 grad: ]
 
 
@@ -875,7 +825,10 @@ defmodule MLP do
       inputs ->
         Layer.call(layer, inputs)
     end
-    |> List.first()
+  end
+
+  def train(mlp, grads, step) do
+    %__MODULE__{layers: Enum.map(mlp.layers, & Layer.train(&1, grads, step))}
   end
 end
 ```
@@ -883,11 +836,681 @@ end
 <!-- livebook:{"output":true} -->
 
 ```
-{:module, MLP, <<70, 79, 82, 49, 0, 0, 15, ...>>, {:call, 2}}
+{:module, MLP, <<70, 79, 82, 49, 0, 0, 18, ...>>, {:train, 3}}
 ```
 
 ```elixir
-MLP.new(2, [3, 3, 1])
-|> MLP.call([x1, x2])
-|> Mermaid.render_value()
+x1 = Value.new(2.0, "x1")
+x2 = Value.new(3.0, "x2")
+x3 = Value.new(-1.0, "x3")
+
+mlp = MLP.new(3, [4, 4, 1])
+
+mlp
+|> MLP.call([x1, x2, x3])
+# |> hd()
+# |> Mermaid.render_value()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+[
+  %Value{
+    data: 0.6603087515779591,
+    grad: nil,
+    op: "tanh",
+    label: "output",
+    id: 11,
+    children: [
+      %Value{
+        data: 0.793360873407211,
+        grad: nil,
+        op: "add",
+        label: "n",
+        id: 27,
+        children: [
+          %Value{
+            data: 0.8818281906240829,
+            grad: nil,
+            op: "sum",
+            label: "x.w",
+            id: 693,
+            children: [
+              %Value{
+                data: 0.5347037293685436,
+                grad: nil,
+                op: "mul",
+                label: "outputw1",
+                id: 526,
+                children: [
+                  %Value{
+                    data: 0.548897643435227,
+                    grad: nil,
+                    op: "tanh",
+                    label: "output",
+                    id: 941,
+                    children: [
+                      %Value{
+                        data: 0.6168022453335086,
+                        grad: nil,
+                        op: "add",
+                        label: "n",
+                        id: 126,
+                        children: [
+                          %Value{
+                            data: 0.5239065100944579,
+                            grad: nil,
+                            op: "sum",
+                            label: "x.w",
+                            id: 977,
+                            children: [%Value{...}, ...]
+                          },
+                          %Value{
+                            data: 0.0928957352390507,
+                            grad: nil,
+                            op: nil,
+                            label: "b",
+                            id: 612,
+                            children: []
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  %Value{
+                    data: 0.9741410548279057,
+                    grad: nil,
+                    op: nil,
+                    label: "w1",
+                    id: 992,
+                    children: []
+                  }
+                ]
+              },
+              %Value{
+                data: -0.45957741220442583,
+                grad: nil,
+                op: "mul",
+                label: "outputw2",
+                id: 889,
+                children: [
+                  %Value{
+                    data: 0.5860209734003081,
+                    grad: nil,
+                    op: "tanh",
+                    label: "output",
+                    id: 234,
+                    children: [
+                      %Value{
+                        data: 0.6715841570192422,
+                        grad: nil,
+                        op: "add",
+                        label: "n",
+                        id: 551,
+                        children: [
+                          %Value{
+                            data: 1.6367349099126525,
+                            grad: nil,
+                            op: "sum",
+                            label: "x.w",
+                            id: 820,
+                            children: [...]
+                          },
+                          %Value{
+                            data: -0.9651507528934102,
+                            grad: nil,
+                            op: nil,
+                            label: "b",
+                            id: 549,
+                            ...
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  %Value{
+                    data: -0.7842337272295725,
+                    grad: nil,
+                    op: nil,
+                    label: "w2",
+                    id: 472,
+                    children: []
+                  }
+                ]
+              },
+              %Value{
+                data: 0.3110563460594714,
+                grad: nil,
+                op: "mul",
+                label: "outputw3",
+                id: 477,
+                children: [
+                  %Value{
+                    data: 0.6553135027481627,
+                    grad: nil,
+                    op: "tanh",
+                    label: "output",
+                    id: 487,
+                    children: [
+                      %Value{
+                        data: 0.7845551986111658,
+                        grad: nil,
+                        op: "add",
+                        label: "n",
+                        id: 982,
+                        children: [
+                          %Value{
+                            data: 1.044801974414714,
+                            grad: nil,
+                            op: "sum",
+                            label: "x.w",
+                            id: 822,
+                            ...
+                          },
+                          %Value{data: -0.26024677580354805, grad: nil, op: nil, label: "b", ...}
+                        ]
+                      }
+                    ]
+                  },
+                  %Value{
+                    data: 0.4746679944103189,
+                    grad: nil,
+                    op: nil,
+                    label: "w3",
+                    id: 693,
+                    children: []
+                  }
+                ]
+              },
+              %Value{
+                data: 0.4956455274004937,
+                grad: nil,
+                op: "mul",
+                label: "outputw4",
+                id: 820,
+                children: [
+                  %Value{
+                    data: 0.5245229375524052,
+                    grad: nil,
+                    op: "tanh",
+                    label: "output",
+                    id: 720,
+                    children: [
+                      %Value{
+                        data: 0.5825590851252967,
+                        grad: nil,
+                        op: "add",
+                        label: "n",
+                        id: 479,
+                        children: [
+                          %Value{
+                            data: -0.008976249112995743,
+                            grad: nil,
+                            op: "sum",
+                            label: "x.w",
+                            ...
+                          },
+                          %Value{data: 0.5915353342382925, grad: nil, op: nil, ...}
+                        ]
+                      }
+                    ]
+                  },
+                  %Value{
+                    data: 0.944945381632569,
+                    grad: nil,
+                    op: nil,
+                    label: "w4",
+                    id: 528,
+                    children: []
+                  }
+                ]
+              }
+            ]
+          },
+          %Value{data: -0.08846731721687195, grad: nil, op: nil, label: "b", id: 369, children: []}
+        ]
+      }
+    ]
+  }
+]
+```
+
+```elixir
+defmodule Loss do
+  def mean_sq_error(expected, predictions) do
+    loss =
+      for {ygt, yout} <- Enum.zip(expected, predictions) do
+        Math.pow(
+          Math.add(
+            yout,
+            Math.mul(
+              ygt,
+              Value.new(-1.0, "a"),
+              "b"
+            ),
+            "c"
+          ),
+          Value.new(2, "exp"),
+          "pow"
+        )
+      end 
+      |> Math.sum("loss")
+
+    %Value{loss | grad: 1.0}
+  end
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:module, Loss, <<70, 79, 82, 49, 0, 0, 10, ...>>, {:mean_sq_error, 2}}
+```
+
+```elixir
+to_list_of_values = fn row ->
+  Enum.with_index(row, & Value.new(&1, "x#{&2}"))
+end
+
+inputs = [
+  [2.0, 3.0, -1.0],
+  [3.0, -1.0, 0.5],
+  [0.5, 1.0, 1.0],
+  [1.0, 1.0, -1.0]
+]
+|> Enum.map(&to_list_of_values.(&1))
+
+expected_outputs = [1.0, -1.0, -1.0, 1.0] |> to_list_of_values.()
+
+predictions = Enum.map(inputs, & MLP.call(mlp, &1) |> hd)
+
+Enum.map(predictions, & Map.get(&1, :data))
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+[0.6603087515779591, 0.6810926577051656, 0.8811100925481773, 0.6567478167209362]
+```
+
+```elixir
+loss = Loss.mean_sq_error(expected_outputs, predictions)
+
+loss.data
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+6.597859909657197
+```
+
+```elixir
+updated_mlp =
+  for _ <- 0..50, reduce: mlp do
+    acc ->
+      new_predictions = Enum.map(inputs, & MLP.call(acc, &1) |> hd)
+      loss = Loss.mean_sq_error(expected_outputs, new_predictions)
+      
+      IO.inspect(loss.data, label: "LOSS DATA")
+      
+      grads = Backward.compute_grads(loss)
+      MLP.train(acc, grads, 0.1)
+  end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+LOSS DATA: 6.597859909657197
+LOSS DATA: 4.053198493965706
+LOSS DATA: 1.3175841770642036
+LOSS DATA: 1.5224248002206135
+LOSS DATA: 1.7856693701359718
+LOSS DATA: 0.09032279304936688
+LOSS DATA: 0.05991429353300874
+LOSS DATA: 0.007119192320229268
+LOSS DATA: 0.007160626340291336
+LOSS DATA: 0.010929920553448245
+LOSS DATA: 0.03950577837430588
+LOSS DATA: 0.7739263380116818
+LOSS DATA: 2.383834308494042
+LOSS DATA: 1.042472604866736
+LOSS DATA: 5.044354398856507
+LOSS DATA: 0.7237532084283772
+LOSS DATA: 0.014050302418359233
+LOSS DATA: 0.013118498467012223
+LOSS DATA: 0.012540698964175114
+LOSS DATA: 0.017706389588265082
+LOSS DATA: 0.016882803121564628
+LOSS DATA: 0.015872179759634692
+LOSS DATA: 0.021418604362802292
+LOSS DATA: 0.019941978578919148
+LOSS DATA: 0.037168617920534
+LOSS DATA: 0.03388781042481569
+LOSS DATA: 0.029439945125246732
+LOSS DATA: 0.025845388124556914
+LOSS DATA: 0.02637762278475325
+LOSS DATA: 0.02405765903900007
+LOSS DATA: 0.02990161441773237
+LOSS DATA: 0.026117677642196226
+LOSS DATA: 0.052188110986564756
+LOSS DATA: 0.04270520744098408
+LOSS DATA: 0.07990578522072792
+LOSS DATA: 0.04210331076312311
+LOSS DATA: 0.12261838778736683
+LOSS DATA: 0.08363775803705234
+LOSS DATA: 0.04229547264761829
+LOSS DATA: 0.07349053729297933
+LOSS DATA: 0.04566633844272193
+LOSS DATA: 0.029939243762798044
+LOSS DATA: 0.02493875138525514
+LOSS DATA: 0.028012012572169655
+LOSS DATA: 0.029488780644709455
+LOSS DATA: 0.018339844328868524
+LOSS DATA: 0.01495976679352095
+LOSS DATA: 0.013317640855268209
+LOSS DATA: 0.01448795828620576
+LOSS DATA: 0.012801557165466458
+LOSS DATA: 0.010398700384304353
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+%MLP{
+  layers: [
+    %Layer{
+      neurons: [
+        %Neuron{
+          weights: [
+            %Value{
+              data: -1.8669570131865285,
+              grad: nil,
+              op: nil,
+              label: "w1",
+              id: 440,
+              children: []
+            },
+            %Value{data: 0.5286895812138411, grad: nil, op: nil, label: "w2", id: 989, children: []},
+            %Value{data: 2.860108542562639, grad: nil, op: nil, label: "w3", id: 416, children: []}
+          ],
+          bias: %Value{
+            data: -1.1247313584840608,
+            grad: nil,
+            op: nil,
+            label: "b",
+            id: 30,
+            children: []
+          }
+        },
+        %Neuron{
+          weights: [
+            %Value{
+              data: -2.2543509652171827,
+              grad: nil,
+              op: nil,
+              label: "w1",
+              id: 707,
+              children: []
+            },
+            %Value{
+              data: -1.3451065092208916,
+              grad: nil,
+              op: nil,
+              label: "w2",
+              id: 762,
+              children: []
+            },
+            %Value{
+              data: -1.4145972247943583,
+              grad: nil,
+              op: nil,
+              label: "w3",
+              id: 314,
+              children: []
+            }
+          ],
+          bias: %Value{
+            data: -1.372915338487819,
+            grad: nil,
+            op: nil,
+            label: "b",
+            id: 383,
+            children: []
+          }
+        },
+        %Neuron{
+          weights: [
+            %Value{
+              data: 0.26665557673571827,
+              grad: nil,
+              op: nil,
+              label: "w1",
+              id: 319,
+              children: []
+            },
+            %Value{data: -0.7173840316778172, grad: nil, op: nil, label: "w2", id: 23, children: []},
+            %Value{data: 2.1321936759246847, grad: nil, op: nil, label: "w3", id: 300, children: []}
+          ],
+          bias: %Value{
+            data: 1.3106192039785245,
+            grad: nil,
+            op: nil,
+            label: "b",
+            id: 663,
+            children: []
+          }
+        },
+        %Neuron{
+          weights: [
+            %Value{data: 3.3704694943078297, grad: nil, op: nil, label: "w1", id: 926, children: []},
+            %Value{data: 1.9564194695694543, grad: nil, op: nil, label: "w2", id: 554, children: []},
+            %Value{
+              data: -1.3627062887179424,
+              grad: nil,
+              op: nil,
+              label: "w3",
+              id: 625,
+              children: []
+            }
+          ],
+          bias: %Value{
+            data: -0.2067919649888856,
+            grad: nil,
+            op: nil,
+            label: "b",
+            id: 968,
+            children: []
+          }
+        }
+      ]
+    },
+    %Layer{
+      neurons: [
+        %Neuron{
+          weights: [
+            %Value{
+              data: 0.24624783789685475,
+              grad: nil,
+              op: nil,
+              label: "w1",
+              id: 628,
+              children: []
+            },
+            %Value{
+              data: 0.16231547583164904,
+              grad: nil,
+              op: nil,
+              label: "w2",
+              id: 319,
+              children: []
+            },
+            %Value{data: -1.507501387291408, grad: nil, op: nil, label: "w3", id: 545, children: []},
+            %Value{data: 0.8163131539167873, grad: nil, op: nil, label: "w4", id: 494, children: []}
+          ],
+          bias: %Value{
+            data: -0.7733515205183088,
+            grad: nil,
+            op: nil,
+            label: "b",
+            id: 612,
+            children: []
+          }
+        },
+        %Neuron{
+          weights: [
+            %Value{
+              data: -1.3236841265012496,
+              grad: nil,
+              op: nil,
+              label: "w1",
+              id: 627,
+              children: []
+            },
+            %Value{
+              data: -0.3084429618977618,
+              grad: nil,
+              op: nil,
+              label: "w2",
+              id: 915,
+              children: []
+            },
+            %Value{
+              data: -0.3513095713132273,
+              grad: nil,
+              op: nil,
+              label: "w3",
+              id: 490,
+              children: []
+            },
+            %Value{
+              data: 0.05243147635468927,
+              grad: nil,
+              op: nil,
+              label: "w4",
+              id: 997,
+              children: []
+            }
+          ],
+          bias: %Value{
+            data: -0.49681001898504334,
+            grad: nil,
+            op: nil,
+            label: "b",
+            id: 549,
+            children: []
+          }
+        },
+        %Neuron{
+          weights: [
+            %Value{data: 0.8948897107599995, grad: nil, op: nil, label: "w1", id: 134, children: []},
+            %Value{
+              data: -0.20407834852331933,
+              grad: nil,
+              op: nil,
+              label: "w2",
+              id: 66,
+              children: []
+            },
+            %Value{data: -2.545907789639769, grad: nil, op: nil, label: "w3", id: 868, children: []},
+            %Value{
+              data: -0.2821452489513278,
+              grad: nil,
+              op: nil,
+              label: "w4",
+              id: 396,
+              children: []
+            }
+          ],
+          bias: %Value{
+            data: -0.3719916579204391,
+            grad: nil,
+            op: nil,
+            label: "b",
+            id: 792,
+            children: []
+          }
+        },
+        %Neuron{
+          weights: [
+            %Value{
+              data: 0.35078739101389034,
+              grad: nil,
+              op: nil,
+              label: "w1",
+              id: 232,
+              children: []
+            },
+            %Value{data: 0.2276781840870872, grad: nil, op: nil, label: "w2", id: 539, children: []},
+            %Value{
+              data: -0.2533356443597778,
+              grad: nil,
+              op: nil,
+              label: "w3",
+              id: 992,
+              children: []
+            },
+            %Value{data: -1.255655618604205, grad: nil, op: nil, label: "w4", id: 376, children: []}
+          ],
+          bias: %Value{
+            data: 3.4375241196439447e-4,
+            grad: nil,
+            op: nil,
+            label: "b",
+            id: 659,
+            children: []
+          }
+        }
+      ]
+    },
+    %Layer{
+      neurons: [
+        %Neuron{
+          weights: [
+            %Value{data: 0.5082178606639498, grad: nil, op: nil, label: "w1", id: 992, children: []},
+            %Value{
+              data: 0.35891926655149203,
+              grad: nil,
+              op: nil,
+              label: "w2",
+              id: 472,
+              children: []
+            },
+            %Value{data: 1.5217720795625775, grad: nil, op: nil, label: "w3", id: 693, children: []},
+            %Value{
+              data: 0.0022599049970576483,
+              grad: nil,
+              op: nil,
+              label: "w4",
+              id: 528,
+              children: []
+            }
+          ],
+          bias: %Value{
+            data: -0.005719439505252565,
+            grad: nil,
+            op: nil,
+            label: "b",
+            id: 369,
+            children: []
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+```elixir
+predictions = Enum.map(inputs, & MLP.call(updated_mlp, &1) |> hd)
+
+Enum.map(predictions, & Map.get(&1, :data))
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+[0.9626020765728172, -0.9433462244439887, -0.9792008418109555, 0.9380270558744623]
 ```
